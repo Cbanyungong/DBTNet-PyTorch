@@ -129,6 +129,7 @@ class DBTNet(nn.Module):
         super(DBTNet, self).__init__()
         self.inplanes = 64
         self.features = nn.Sequential()
+        self.sg_layers = list()
         self.expansion = 4
 
         # -------------
@@ -146,10 +147,14 @@ class DBTNet(nn.Module):
         # -------------
         # resnet-dbt block
         # -------------
-        self.features.add_module("block_1", self._make_layer(64, layers[0], batch_size, device, use_dbt=False))
-        self.features.add_module("block_2", self._make_layer(128, layers[1], batch_size, device, use_dbt=False))
-        self.features.add_module("block_3", self._make_layer(256, layers[2], batch_size, device, groups=16, use_dbt=True))
-        self.features.add_module("block_4", self._make_layer(512, layers[3], batch_size, device, groups=16, use_dbt=True))
+        self.features.add_module("block_1", self._make_layer("block_1", 64, layers[0],
+                                                             batch_size, device, use_dbt=False))
+        self.features.add_module("block_2", self._make_layer("block_2", 128, layers[1],
+                                                             batch_size, device, use_dbt=False))
+        self.features.add_module("block_3", self._make_layer("block_3", 256, layers[2],
+                                                             batch_size, device, groups=16, use_dbt=True))
+        self.features.add_module("block_4", self._make_layer("block_4", 512, layers[3],
+                                                             batch_size, device, groups=16, use_dbt=True))
 
         # -------------
         # last DBT module
@@ -158,6 +163,7 @@ class DBTNet(nn.Module):
         self.last_gb_layer = GroupBilinearLayer(32, self.inplanes)
         self.features.add_module("last_sg_layer", self.last_sg_layer)
         self.features.add_module("last_gb_layer", self.last_gb_layer)
+        self.sg_layers.append(self.last_sg_layer)
 
         # -------------
         # output
@@ -166,17 +172,25 @@ class DBTNet(nn.Module):
         self.features.add_module("output_11conv", nn.Conv2d(self.inplanes, classes, 1))
         self.avgpooling = nn.AdaptiveAvgPool2d((1, 1))
 
-    def _make_layer(self, base_planes, blocks_num, batch_size, device, groups=None, use_dbt=False):
+    def _make_layer(self, basic_name, base_planes, blocks_num, batch_size, device, groups=None, use_dbt=False):
         layers = nn.Sequential()
 
-        layers.add_module("dbtblock_1", DBTNetBlock(inplanes=self.inplanes, planes=base_planes, batch_size=batch_size,
-                                                    device=device, groups=groups, downsample=True, use_dbt=use_dbt))
+        dbt_block = DBTNetBlock(inplanes=self.inplanes, planes=base_planes, batch_size=batch_size,
+                                device=device, groups=groups, downsample=True, use_dbt=use_dbt)
+        layers.add_module("{}_dbt_1".format(basic_name), dbt_block)
+        if use_dbt:
+            self.sg_layers.append(dbt_block.sg_layer)
+
         self.inplanes = base_planes * self.expansion
 
         for i in range(blocks_num-1):
-            layers.add_module("dbtblock_{}".format(i+2), DBTNetBlock(inplanes=self.inplanes, planes=base_planes,
-                                                                     batch_size=batch_size, device=device,
-                                                                     groups=groups, use_dbt=use_dbt))
+            dbt_block = DBTNetBlock(inplanes=self.inplanes, planes=base_planes, batch_size=batch_size,
+                                    device=device, groups=groups, use_dbt=use_dbt)
+
+            layers.add_module("{}_dbt_{}".format(basic_name, i+2), dbt_block)
+
+            if use_dbt:
+                self.sg_layers.append(dbt_block.sg_layer)
 
         return layers
 
@@ -184,7 +198,32 @@ class DBTNet(nn.Module):
         x = self.features(x)
         x = self.avgpooling(x)
         x = x.view(x.shape[0], -1)
-        return x
+
+        # loss
+        dbt_loss = None
+        sg_layer_count = 0
+        for sg_layer in self.sg_layers:
+            if sg_layer_count == 0:
+                dbt_loss = sg_layer.loss
+            else:
+                dbt_loss += sg_layer.loss
+
+            sg_layer_count += 1
+
+        dbt_loss /= sg_layer_count
+        return x, dbt_loss
+
+
+dbt_spec = {"DBTNet-50": [3, 4, 6, 3],
+            "DBTNet-101": [3, 4, 23, 3]}
+
+
+def dbt(model_name, batch_size, device):
+
+    assert model_name in dbt_spec, "the model name: {} is not ."
+
+    model = DBTNet(dbt_spec[model_name], batch_size, device).to(device)
+    return model
 
 
 if __name__ == "__main__":
@@ -194,7 +233,9 @@ if __name__ == "__main__":
     else:
         device = torch.device("cpu")
 
-    dbt_net = DBTNet([3, 4, 6, 3], 48, device).to(device)
-    test_noise = torch.randn((12, 3, 448, 448)).to(device)
-    output = dbt_net(test_noise)
-    print(output.shape)
+    dbt_net = dbt("DBTNet-50", 36, device)
+    # dbt_net = DBTNet([3, 4, 23, 3], 48, device).to(device)
+    # dbt_net = DBTNet([3, 4, 6, 3], 48, device).to(device)
+    test_noise = torch.randn((36, 3, 448, 448)).to(device)
+    output, loss = dbt_net(test_noise)
+    print(output.shape, loss.shape)
