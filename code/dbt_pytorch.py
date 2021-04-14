@@ -22,8 +22,11 @@ class SemanticGroupingLayer(nn.Module):
 
         self.gt = torch.ones(self.groups).diag().to(device)
         self.gt = self.gt.reshape((1, 1, self.groups, self.groups))
+        # 1 1 groups groups
         self.gt = self.gt.repeat((1, int((self.out_channels / self.groups) ** 2), 1, 1))
+        # 1 out_channels/groups groups groups
         self.gt = F.pixel_shuffle(self.gt, upscale_factor=int(self.out_channels / self.groups))
+        # 1 1 out_channels out_channels
         self.gt = self.gt.reshape((1, self.out_channels ** 2))
 
         self.loss = 0
