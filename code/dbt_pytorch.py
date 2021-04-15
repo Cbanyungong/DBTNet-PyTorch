@@ -1,3 +1,4 @@
+import numpy as np
 import torch
 from torch import nn
 import torch.nn.functional as F
@@ -53,9 +54,32 @@ class SemanticGroupingLayer(nn.Module):
         return act
 
 
+class PositionEncoding(object):
+    def __init__(self, group, device):
+        self.group = group
+        self.device = device
+
+    def cal_angle(self, position, hid_idx):
+        return position * 1.0 / np.power(1.5, 2.0*hid_idx/self.group)
+
+    def get_position_angle_vec(self, position):
+        return [self.cal_angle(position, hid_j) for hid_j in range(self.group)]
+
+    def __call__(self, bias_shape):
+
+        n_position = int(bias_shape/self.group)
+
+        sinusoid_table = np.array([self.get_position_angle_vec(pos_i) for pos_i in range(n_position)])
+
+        sinusoid_table[:, 0::2] = np.sin(sinusoid_table[:, 0::2])  # dim 2i
+        sinusoid_table[:, 1::2] = np.cos(sinusoid_table[:, 1::2])  # dim 2i+1
+        bias = torch.from_numpy(np.array(sinusoid_table.flat)).to(dtype=torch.float)
+        return bias
+
+
 class GroupBilinearLayer(nn.Module):
 
-    def __init__(self, groups, channels):
+    def __init__(self, groups, channels, device):
         super(GroupBilinearLayer, self).__init__()
 
         self.groups = groups
@@ -64,6 +88,9 @@ class GroupBilinearLayer(nn.Module):
 
         self.fc = nn.Linear(channels, channels)
         self.bn = nn.BatchNorm2d(channels)
+
+        self.position_encoding = PositionEncoding(groups, device)
+        self.fc.bias.data = self.position_encoding(self.fc.bias.data.shape[0])
 
     def forward(self, x):
 
@@ -96,7 +123,7 @@ class DBTNetBlock(nn.Module):
 
         if use_dbt:
             self.sg_layer = SemanticGroupingLayer(inplanes, planes, batch_size, groups, device)
-            self.gb_layer = GroupBilinearLayer(groups, planes)
+            self.gb_layer = GroupBilinearLayer(groups, planes, device)
             self.block.add_module("sg_layer", self.sg_layer)
             self.block.add_module("gb_layer", self.gb_layer)
         else:
@@ -163,7 +190,7 @@ class DBTNet(nn.Module):
         # last DBT module
         # ------------
         self.last_sg_layer = SemanticGroupingLayer(self.inplanes, self.inplanes, batch_size, 32, device)
-        self.last_gb_layer = GroupBilinearLayer(32, self.inplanes)
+        self.last_gb_layer = GroupBilinearLayer(32, self.inplanes, device)
         self.features.add_module("last_sg_layer", self.last_sg_layer)
         self.features.add_module("last_gb_layer", self.last_gb_layer)
         self.sg_layers.append(self.last_sg_layer)
@@ -236,9 +263,9 @@ if __name__ == "__main__":
     else:
         device = torch.device("cpu")
 
-    dbt_net = dbt("DBTNet-50", 36, device)
+    dbt_net = dbt("DBTNet-50", 12, device)
     # dbt_net = DBTNet([3, 4, 23, 3], 48, device).to(device)
     # dbt_net = DBTNet([3, 4, 6, 3], 48, device).to(device)
-    test_noise = torch.randn((36, 3, 448, 448)).to(device)
+    test_noise = torch.randn((12, 3, 448, 448)).to(device)
     output, loss = dbt_net(test_noise)
     print(output.shape, loss.shape)
